@@ -20,7 +20,7 @@ CREATE TABLE Courses (
     course_id SERIAL PRIMARY KEY,
     course_name VARCHAR(150) NOT NULL,
     description TEXT,
-    lecturer_id INT REFERENCES Users(user_id) -- must be a lecturer
+    lecturer_id INT REFERENCES Users(user_id) 
 );
 
 
