@@ -1,151 +1,161 @@
-
-from flask import Flask, request, jsonify
-import psycopg2
 import os
-from datetime import datetime
+import psycopg2
+from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# === DB Connection ===
-conn = psycopg2.connect(
-    dbname="course_db",
-    user="postgres",
-    password="yourpassword",
-    host="localhost",
-    port="5432"
-)
-cursor = conn.cursor()
+DATABASE_URL = os.environ.get("DATABASE_URL", "dbname=course_db user=ravaughnmarsh")
 
-UPLOAD_FOLDER = './uploads'
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+def get_cursor():
+    conn = psycopg2.connect(DATABASE_URL)
+    return conn.cursor(), conn
 
-# === Forum Routes ===
-@app.route('/forums', methods=['POST'])
-def create_forum():
-    data = request.json
-    course_id = data['course_id']
-    title = data['forum_title']
-    cursor.execute("INSERT INTO Forums (course_id, forum_title) VALUES (%s, %s) RETURNING forum_id", (course_id, title))
-    forum_id = cursor.fetchone()[0]
+# --- Students --------------------------------------------------------------
+
+@app.route('/students', methods=['GET'])
+def list_students():
+    cur, conn = get_cursor()
+    cur.execute("SELECT user_id, name, email FROM Users WHERE account_type = 'Student'")
+    rows = cur.fetchall()
+    conn.close()
+    return jsonify([{'student_id': u, 'name': n, 'email': e} for u, n, e in rows])
+
+@app.route('/students/<int:student_id>/courses', methods=['GET'])
+def get_student_courses(student_id):
+    cur, conn = get_cursor()
+    cur.execute("""
+        SELECT c.course_id,
+               c.title
+          FROM Courses c
+          JOIN Enrollments e ON c.course_id = e.course_id
+         WHERE e.user_id = %s
+    """, (student_id,))
+    rows = cur.fetchall()
+    conn.close()
+    return jsonify([{'course_id': cid, 'title': title} for cid, title in rows])
+
+@app.route('/students/<int:student_id>/average', methods=['GET'])
+def get_student_average(student_id):
+    cur, conn = get_cursor()
+    cur.execute("""
+        SELECT AVG(s.grade)::numeric(5,2)
+          FROM Submissions s
+         WHERE s.user_id = %s
+           AND s.grade IS NOT NULL
+    """, (student_id,))
+    avg, = cur.fetchone() or (None,)
+    conn.close()
+    return jsonify({'student_id': student_id, 'average': float(avg) if avg is not None else None})
+
+# --- Lecturers -------------------------------------------------------------
+
+@app.route('/lecturers/<int:lecturer_id>/courses', methods=['GET'])
+def get_lecturer_courses(lecturer_id):
+    cur, conn = get_cursor()
+    cur.execute("""
+        SELECT course_id, title
+          FROM Courses
+         WHERE lecturer_id = %s
+    """, (lecturer_id,))
+    rows = cur.fetchall()
+    conn.close()
+    return jsonify([{'course_id': cid, 'title': title} for cid, title in rows])
+
+# --- Registration & Submissions --------------------------------------------
+
+@app.route('/courses/<int:course_id>/register', methods=['POST'])
+def register_course(course_id):
+    data = request.get_json()
+    student_id = data.get('student_id')
+    if not student_id:
+        return jsonify({'error': 'Missing `student_id`'}), 400
+
+    cur, conn = get_cursor()
+    cur.execute("""
+        INSERT INTO Enrollments (user_id, course_id)
+        VALUES (%s, %s)
+        ON CONFLICT DO NOTHING
+    """, (student_id, course_id))
     conn.commit()
-    return jsonify({"forum_id": forum_id}), 201
+    conn.close()
+    return jsonify({'status': 'registered', 'student_id': student_id, 'course_id': course_id})
 
-@app.route('/forums/<int:course_id>', methods=['GET'])
-def get_forums(course_id):
-    cursor.execute("SELECT forum_id, forum_title FROM Forums WHERE course_id = %s", (course_id,))
-    forums = cursor.fetchall()
-    return jsonify([{"id": f[0], "title": f[1]} for f in forums])
+@app.route('/courses/<int:course_id>/assignments/<int:assignment_id>/submit', methods=['POST'])
+def submit_assignment(course_id, assignment_id):
+    data = request.get_json()
+    student_id = data.get('student_id')
+    content    = data.get('content')
+    submitted_at = data.get('submitted_at')
+    if not all([student_id, content, submitted_at]):
+        return jsonify({'error': 'Missing fields'}), 400
 
-@app.route('/threads', methods=['POST'])
-def create_thread():
-    data = request.json
-    forum_id = data['forum_id']
-    user_id = data['user_id']
-    title = data['title']
-    content = data['content']
-    cursor.execute("""
-        INSERT INTO DiscussionThreads (forum_id, user_id, title, content)
-        VALUES (%s, %s, %s, %s) RETURNING thread_id
-    """, (forum_id, user_id, title, content))
-    thread_id = cursor.fetchone()[0]
-    conn.commit()
-    return jsonify({"thread_id": thread_id}), 201
-
-@app.route('/threads/<int:forum_id>', methods=['GET'])
-def get_threads(forum_id):
-    cursor.execute("SELECT thread_id, title, content FROM DiscussionThreads WHERE forum_id = %s", (forum_id,))
-    threads = cursor.fetchall()
-    return jsonify([{"id": t[0], "title": t[1], "content": t[2]} for t in threads])
-
-@app.route('/threads/<int:thread_id>/reply', methods=['POST'])
-def reply_thread(thread_id):
-    data = request.json
-    parent_id = data.get('parent_reply_id')
-    user_id = data['user_id']
-    content = data['content']
-    cursor.execute("""
-        INSERT INTO Replies (thread_id, parent_reply_id, user_id, content)
+    cur, conn = get_cursor()
+    cur.execute("""
+        INSERT INTO Submissions (assignment_id, user_id, file_link, submitted_at)
         VALUES (%s, %s, %s, %s)
-    """, (thread_id, parent_id, user_id, content))
+        RETURNING submission_id
+    """, (assignment_id, student_id, content, submitted_at))
+    sub_id, = cur.fetchone()
     conn.commit()
-    return jsonify({"message": "Reply posted."}), 201
+    conn.close()
+    return jsonify({'submission_id': sub_id})
 
-# Recursive reply fetcher
-@app.route('/threads/<int:thread_id>', methods=['GET'])
-def get_thread_with_replies(thread_id):
-    def fetch_replies(parent_id=None):
-        if parent_id:
-            cursor.execute("SELECT reply_id, content FROM Replies WHERE parent_reply_id = %s", (parent_id,))
-        else:
-            cursor.execute("SELECT reply_id, content FROM Replies WHERE parent_reply_id IS NULL AND thread_id = %s", (thread_id,))
-        replies = cursor.fetchall()
-        return [{"id": r[0], "content": r[1], "replies": fetch_replies(r[0])} for r in replies]
+@app.route('/submissions/<int:submission_id>/grade', methods=['PUT'])
+def grade_submission(submission_id):
+    data = request.get_json()
+    grader_id = data.get('grader_id')
+    grade     = data.get('grade')
+    if grader_id is None or grade is None:
+        return jsonify({'error': 'Missing `grader_id` or `grade`'}), 400
 
-    cursor.execute("SELECT title, content FROM DiscussionThreads WHERE thread_id = %s", (thread_id,))
-    thread = cursor.fetchone()
-    return jsonify({"thread": {"title": thread[0], "content": thread[1]}, "replies": fetch_replies()})
-
-# === Course Content Routes ===
-@app.route('/content/section', methods=['POST'])
-def create_section():
-    data = request.json
-    course_id = data['course_id']
-    title = data['section_title']
-    section_type = data.get('section_type', 'Lecture')
-    cursor.execute("INSERT INTO Sections (course_id, section_title, section_type) VALUES (%s, %s, %s) RETURNING section_id", (course_id, title, section_type))
-    section_id = cursor.fetchone()[0]
+    cur, conn = get_cursor()
+    cur.execute("""
+        UPDATE Submissions
+           SET grade = %s,
+               grader_id = %s
+         WHERE submission_id = %s
+         RETURNING submission_id, grader_id, grade
+    """, (grade, grader_id, submission_id))
+    row = cur.fetchone()
     conn.commit()
-    return jsonify({"section_id": section_id}), 201
+    conn.close()
+    if not row:
+        return jsonify({'error': 'Submission not found'}), 404
 
-@app.route('/content', methods=['POST'])
-def upload_content():
-    section_id = request.form['section_id']
-    name = request.form['name']
-    content_type = request.form['type']
+    return jsonify({
+        'submission_id': row[0],
+        'grader_id'    : row[1],
+        'grade'        : float(row[2])
+    })
 
-    if content_type == 'file':
-        file = request.files['file']
-        file_path = os.path.join(app.config['UPLOAD_FOLDER'], file.filename)
-        file.save(file_path)
-        cursor.execute("""
-            INSERT INTO SectionItems (section_id, type, name, link)
-            VALUES (%s, %s, %s, %s)
-        """, (section_id, content_type, name, file_path))
-    elif content_type in ['link', 'slide']:
-        link = request.form['link']
-        cursor.execute("""
-            INSERT INTO SectionItems (section_id, type, name, link)
-            VALUES (%s, %s, %s, %s)
-        """, (section_id, content_type, name, link))
-    else:
-        return jsonify({"error": "Invalid content type."}), 400
+# --- Reporting -------------------------------------------------------------
 
-    conn.commit()
-    return jsonify({"message": "Content uploaded."}), 201
+def make_report(view_name, columns):
+    cur, conn = get_cursor()
+    cur.execute(f"SELECT * FROM {view_name}")
+    rows = cur.fetchall()
+    conn.close()
+    return jsonify([dict(zip(columns, r)) for r in rows])
 
-@app.route('/content/<int:course_id>', methods=['GET'])
-def get_course_content(course_id):
-    cursor.execute("SELECT section_id, section_title FROM Sections WHERE course_id = %s", (course_id,))
-    sections = cursor.fetchall()
-    result = []
-    for section in sections:
-        section_id, title = section
-        cursor.execute("""
-            SELECT item_id, type, name, link FROM SectionItems
-            WHERE section_id = %s
-        """, (section_id,))
-        content_items = cursor.fetchall()
-        items = []
-        for item in content_items:
-            items.append({
-                "id": item[0],
-                "type": item[1],
-                "name": item[2],
-                "link": item[3]
-            })
-        result.append({"section": title, "items": items})
-    return jsonify(result)
+@app.route('/reports/courses_50_plus', methods=['GET'])
+def report_courses_50_plus():
+    return make_report('courses_50_plus', ['course_id','title','student_count'])
+
+@app.route('/reports/students_5_plus', methods=['GET'])
+def report_students_5_plus():
+    return make_report('students_5_plus', ['student_id','student_name','course_count'])
+
+@app.route('/reports/lecturers_3_plus', methods=['GET'])
+def report_lecturers_3_plus():
+    return make_report('lecturers_3_plus', ['lecturer_id','lecturer_name','course_count'])
+
+@app.route('/reports/top_10_enrolled', methods=['GET'])
+def report_top_10_enrolled():
+    return make_report('top_10_enrolled', ['course_id','title','student_count'])
+
+@app.route('/reports/top_10_students', methods=['GET'])
+def report_top_10_students():
+    return make_report('top_10_students', ['student_id','student_name','average_grade'])
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=True, port=5000)
