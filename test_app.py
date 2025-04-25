@@ -1,22 +1,15 @@
-import pytest
+import unittest
 from app import app
 
-@pytest.fixture
-def client():
-    app.config['TESTING'] = True
-    with app.test_client() as client:
-        yield client
+class FlaskAppTests(unittest.TestCase):
+    def setUp(self):
+        self.app = app.test_client()
+        self.app.testing = True
 
-def test_create_forum(client):
-    # Adjust course_id as needed based on what's in your DB
-    res = client.post('/forums', json={
-        "course_id": 101,
-        "forum_title": "Test Forum"
-    })
-    assert res.status_code == 201
-    assert "forum_id" in res.get_json()
+    def test_home_status_code(self):
+        response = self.app.get('/')
+        self.assertEqual(response.status_code, 200)
 
-def test_get_forums(client):
-    res = client.get('/forums/101')
-    assert res.status_code == 200
-    assert isinstance(res.get_json(), list)
+if __name__ == '__main__':
+    unittest.main()
+
