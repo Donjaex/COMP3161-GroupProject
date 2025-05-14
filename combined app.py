@@ -25,6 +25,45 @@ def handle_error(e, conn=None):
     app.logger.error(f"Error occurred: {e}")
     return jsonify({"error": str(e)}), 500
 
+# -------------------- AUTH --------------------
+
+@app.route('/auth/register', methods=['POST'])
+def register():
+    try:
+        data = request.get_json()
+        required_fields = ['user_id', 'name', 'account_type', 'email', 'password']
+        if not all(field in data for field in required_fields):
+            return jsonify({'error': 'Missing fields in request'}), 400
+
+        cur, conn = get_cursor()
+        cur.execute("""
+            INSERT INTO Users (user_id, name, account_type, email, password)
+            VALUES (%s, %s, %s, %s, %s)
+        """, (data['user_id'], data['name'], data['account_type'], data['email'], data['password']))
+        conn.commit()
+        conn.close()
+        return jsonify({'message': 'User registered successfully'})
+    except Exception as e:
+        return handle_error(e)
+
+@app.route('/auth/login', methods=['POST'])
+def login():
+    try:
+        data = request.get_json()
+        if 'email' not in data or 'password' not in data:
+            return jsonify({'error': 'Email and password required'}), 400
+
+        cur, conn = get_cursor()
+        cur.execute("SELECT * FROM Users WHERE email=%s AND password=%s", (data['email'], data['password']))
+        columns = [desc[0] for desc in cur.description]
+        user = dict(zip(columns, cur.fetchone())) if cur.rowcount > 0 else None
+        conn.close()
+        if user:
+            return jsonify(user)
+        return jsonify({'error': 'Invalid credentials'}), 401
+    except Exception as e:
+        return handle_error(e)
+
 # === Students Routes ===
 @app.route('/students', methods=['GET'])
 def list_students():
@@ -41,16 +80,39 @@ def list_students():
 def get_student_courses(student_id):
     try:
         cur, conn = get_cursor()
+        
+        # Get column names to identify the title column
         cur.execute("""
-            SELECT c.course_id,
-                c.title
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_schema = 'public' 
+            AND table_name = 'courses'
+        """)
+        columns = [col[0] for col in cur.fetchall()]
+        
+        # Look for possible title columns
+        title_column = None
+        possible_names = ['name', 'course_name', 'course_title', 'title', 'description']
+        for col in possible_names:
+            if col in columns:
+                title_column = col
+                break
+        
+        if not title_column:
+            return jsonify({"error": "Could not find title column in courses table"}), 500
+        
+        # Use the identified column name in the query
+        query = f"""
+            SELECT c.course_id, c.{title_column}
             FROM Courses c
             JOIN Enrollments e ON c.course_id = e.course_id
             WHERE e.user_id = %s
-        """, (student_id,))
+        """
+        
+        cur.execute(query, (student_id,))
         rows = cur.fetchall()
         conn.close()
-        return jsonify([{'course_id': cid, 'title': title} for cid, title in rows])
+        return jsonify([{'course_id': row[0], 'title': row[1]} for row in rows])
     except Exception as e:
         return handle_error(e)
 
@@ -67,6 +129,69 @@ def get_student_average(student_id):
         avg, = cur.fetchone() or (None,)
         conn.close()
         return jsonify({'student_id': student_id, 'average': float(avg) if avg is not None else None})
+    except Exception as e:
+        return handle_error(e)
+
+# -------------------- COURSES --------------------
+
+@app.route('/courses/create', methods=['POST'])
+def create_course():
+    try:
+        data = request.get_json()
+        if data.get('account_type') != 'admin':
+            return jsonify({'error': 'Only admins can create courses'}), 403
+
+        # Get the table structure to identify the correct column names
+        cur, conn = get_cursor()
+        cur.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_schema = 'public' 
+            AND table_name = 'courses'
+        """)
+        columns = [col[0] for col in cur.fetchall()]
+        
+        # Map the expected fields to actual database columns
+        field_mappings = {
+            'course_id': 'course_id',
+            'title': next((col for col in ['title', 'course_name', 'name'] if col in columns), None),
+            'description': 'description',
+            'lecturer_id': 'lecturer_id'
+        }
+        
+        # Check if all required fields are available in the database
+        if None in field_mappings.values():
+            missing_fields = [k for k, v in field_mappings.items() if v is None]
+            return jsonify({'error': f'Database schema missing required fields: {missing_fields}'}), 500
+            
+        # Validate the request has all required fields
+        required_fields = ['course_id', 'title', 'description', 'lecturer_id']
+        if not all(field in data for field in required_fields):
+            return jsonify({'error': 'Missing course information'}), 400
+            
+        # Create the SQL query with the correct column names
+        query = f"""
+            INSERT INTO Courses (course_id, {field_mappings['title']}, description, lecturer_id)
+            VALUES (%s, %s, %s, %s)
+        """
+        
+        # Execute the query
+        cur.execute(query, (data['course_id'], data['title'], data['description'], data['lecturer_id']))
+        conn.commit()
+        conn.close()
+        return jsonify({'message': 'Course created'})
+    except Exception as e:
+        return handle_error(e)
+
+@app.route('/courses/all', methods=['GET'])
+def get_all_courses():
+    try:
+        cur, conn = get_cursor()
+        cur.execute("SELECT * FROM Courses")
+        columns = [desc[0] for desc in cur.description]
+        courses = [dict(zip(columns, row)) for row in cur.fetchall()]
+        conn.close()
+        return jsonify(courses)
     except Exception as e:
         return handle_error(e)
 
@@ -156,6 +281,7 @@ def submit_assignment(course_id, assignment_id):
         })
     except Exception as e:
         return handle_error(e)
+
 @app.route('/submissions/<int:assignment_id>/<int:user_id>/grade', methods=['PUT'])
 def grade_submission(assignment_id, user_id):
     try:
@@ -198,7 +324,29 @@ def make_report(view_name, columns):
 
 @app.route('/reports/courses_50_plus', methods=['GET'])
 def report_courses_50_plus():
-    return make_report('courses_50_plus', ['course_id', 'title', 'student_count'])
+    # Get column names to identify the title column
+    try:
+        cur, conn = get_cursor()
+        cur.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_schema = 'public' 
+            AND table_name = 'courses'
+        """)
+        columns = [col[0] for col in cur.fetchall()]
+        
+        # Look for possible title columns
+        title_column = 'title'  # Default
+        possible_names = ['name', 'course_name', 'course_title', 'title', 'description']
+        for col in possible_names:
+            if col in columns:
+                title_column = col
+                break
+                
+        conn.close()
+        return make_report('courses_50_plus', ['course_id', title_column, 'student_count'])
+    except Exception as e:
+        return handle_error(e)
 
 @app.route('/reports/students_5_plus', methods=['GET'])
 def report_students_5_plus():
@@ -210,11 +358,112 @@ def report_lecturers_3_plus():
 
 @app.route('/reports/top_10_enrolled', methods=['GET'])
 def report_top_10_enrolled():
-    return make_report('top_10_enrolled', ['course_id', 'title', 'student_count'])
+    # Get column names to identify the title column
+    try:
+        cur, conn = get_cursor()
+        cur.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_schema = 'public' 
+            AND table_name = 'courses'
+        """)
+        columns = [col[0] for col in cur.fetchall()]
+        
+        # Look for possible title columns
+        title_column = 'title'  # Default
+        possible_names = ['name', 'course_name', 'course_title', 'title', 'description']
+        for col in possible_names:
+            if col in columns:
+                title_column = col
+                break
+                
+        conn.close()
+        return make_report('top_10_enrolled', ['course_id', title_column, 'student_count'])
+    except Exception as e:
+        return handle_error(e)
 
 @app.route('/reports/top_10_students', methods=['GET'])
 def report_top_10_students():
     return make_report('top_10_students', ['student_id', 'student_name', 'average_grade'])
+
+@app.route('/courses/most-enrolled', methods=['GET'])
+def most_enrolled_courses():
+    try:
+        # Get cursor to interact with the database
+        cur, conn = get_cursor()
+        
+        # Get column names to identify the title column
+        cur.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_schema = 'public' 
+            AND table_name = 'courses'
+        """)
+        columns = [col[0] for col in cur.fetchall()]
+        
+        # Look for possible title columns
+        title_column = None
+        possible_names = ['name', 'course_name', 'course_title', 'title', 'description']
+        for col in possible_names:
+            if col in columns:
+                title_column = col
+                break
+        
+        if not title_column:
+            return jsonify({"error": "Could not find title column in courses table"}), 500
+        
+        # Execute the SQL to get the most enrolled courses with dynamic column name
+        query = f"""
+            SELECT c.course_id, c.{title_column}, COUNT(e.user_id) AS student_count
+            FROM Courses c
+            JOIN Enrollments e ON c.course_id = e.course_id
+            GROUP BY c.course_id, c.{title_column}
+            ORDER BY student_count DESC
+            LIMIT 10
+        """
+        
+        cur.execute(query)
+        courses = cur.fetchall()
+        
+        # Format the results
+        formatted_courses = []
+        for course in courses:
+            formatted_courses.append({
+                'course_id': course[0],
+                'title': course[1],
+                'student_count': course[2]
+            })
+            
+        conn.close()
+        
+        return jsonify(formatted_courses)
+    except Exception as e:
+        return handle_error(e)
+
+@app.route('/students/top-10-averages', methods=['GET'])
+def get_top_10_students_by_average():
+    try:
+        cur, conn = get_cursor()
+
+        if cur is None or conn is None:
+            return jsonify({"error": "Database connection failed."}), 500
+
+        # Query to get the top 10 students with the highest overall averages
+        cur.execute("""
+            SELECT u.user_id, u.name, AVG(s.grade) AS average_grade
+            FROM Users u
+            JOIN Submissions s ON u.user_id = s.user_id
+            GROUP BY u.user_id
+            ORDER BY average_grade DESC
+            LIMIT 10;
+        """)
+
+        students = cur.fetchall()
+        conn.close()
+
+        return jsonify(students), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 # === Forum Routes ===
 @app.route('/forums', methods=['POST'])
@@ -302,9 +551,7 @@ def create_thread():
         }), 201
 
     except Exception as e:
-        # Handle any exceptions that occur during execution
-        return jsonify({"error": str(e)}), 500
-
+        return handle_error(e)
 
 @app.route('/threads/<int:forum_id>', methods=['GET'])
 def get_threads(forum_id):
@@ -317,6 +564,32 @@ def get_threads(forum_id):
     except Exception as e:
         return handle_error(e)
 
+@app.route('/threads/<int:thread_id>', methods=['GET'])
+def get_thread_with_replies(thread_id):
+    try:
+        cur, conn = get_cursor()
+        
+        def fetch_replies(parent_id=None):
+            if parent_id:
+                cur.execute("SELECT reply_id, content FROM Replies WHERE parent_reply_id = %s", (parent_id,))
+            else:
+                cur.execute("SELECT reply_id, content FROM Replies WHERE parent_reply_id IS NULL AND thread_id = %s", (thread_id,))
+            replies = cur.fetchall()
+            return [{"id": r[0], "content": r[1], "replies": fetch_replies(r[0])} for r in replies]
+
+        cur.execute("SELECT title, content FROM DiscussionThreads WHERE thread_id = %s", (thread_id,))
+        thread = cur.fetchone()
+        
+        if not thread:
+            conn.close()
+            return jsonify({"error": "Thread not found"}), 404
+            
+        result = jsonify({"thread": {"title": thread[0], "content": thread[1]}, "replies": fetch_replies()})
+        conn.close()
+        return result
+    except Exception as e:
+        return handle_error(e)
+
 @app.route('/replies', methods=['POST'])
 def create_reply():
     try:
@@ -325,7 +598,7 @@ def create_reply():
         user_id = data['user_id']
         content = data['content']
         parent_reply_id = data.get('parent_reply_id')  # Optional (if this is a reply to an existing reply)
-        created_at = data.get('created_at')  # Timestamp for the reply (optional, if you want to use a specific time)
+        created_at = data.get('created_at')  # Timestamp for the reply (optional)
 
         # Connect to the database
         cur, conn = get_cursor()
@@ -366,89 +639,6 @@ def create_reply():
             "timestamp": timestamp.isoformat()  # Format timestamp to ISO 8601
         }), 201
 
-    except Exception as e:
-        # Handle any exceptions that occur during execution
-        return jsonify({"error": str(e)}), 500
- 
-    
-@app.route('/courses/most-enrolled', methods=['GET'])
-def most_enrolled_courses():
-    try:
-        # Get cursor to interact with the database
-        cur, conn = get_cursor()
-        
-        # Execute the SQL to get the most enrolled courses
-        cur.execute("""
-            SELECT c.course_id, c.course_name, COUNT(e.user_id) AS student_count
-            FROM Courses c
-            JOIN Enrollments e ON c.course_id = e.course_id
-            GROUP BY c.course_id
-            ORDER BY student_count DESC
-            LIMIT 10
-        """)
-        
-        
-        courses = cur.fetchall()
-        
-        
-        conn.close()
-        
-        
-        return jsonify(courses)
-    except Exception as e:
-        return handle_error(e)
-
-
-
-@app.route('/students/top-10-averages', methods=['GET'])
-def get_top_10_students_by_average():
-    try:
-        cur, conn = get_cursor()
-
-        if cur is None or conn is None:
-            return jsonify({"error": "Database connection failed."}), 500
-
-        # Query to get the top 10 students with the highest overall averages
-        cur.execute("""
-            SELECT u.user_id, u.name, AVG(s.grade) AS average_grade
-            FROM Users u
-            JOIN Submissions s ON u.user_id = s.user_id
-            GROUP BY u.user_id
-            ORDER BY average_grade DESC
-            LIMIT 10;
-        """)
-
-        students = cur.fetchall()
-        conn.close()
-
-        return jsonify(students), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/threads/<int:thread_id>', methods=['GET'])
-def get_thread_with_replies(thread_id):
-    try:
-        cur, conn = get_cursor()
-        
-        def fetch_replies(parent_id=None):
-            if parent_id:
-                cur.execute("SELECT reply_id, content FROM Replies WHERE parent_reply_id = %s", (parent_id,))
-            else:
-                cur.execute("SELECT reply_id, content FROM Replies WHERE parent_reply_id IS NULL AND thread_id = %s", (thread_id,))
-            replies = cur.fetchall()
-            return [{"id": r[0], "content": r[1], "replies": fetch_replies(r[0])} for r in replies]
-
-        cur.execute("SELECT title, content FROM DiscussionThreads WHERE thread_id = %s", (thread_id,))
-        thread = cur.fetchone()
-        
-        if not thread:
-            conn.close()
-            return jsonify({"error": "Thread not found"}), 404
-            
-        result = jsonify({"thread": {"title": thread[0], "content": thread[1]}, "replies": fetch_replies()})
-        conn.close()
-        return result
     except Exception as e:
         return handle_error(e)
 
@@ -557,6 +747,60 @@ def get_course_content(course_id):
             result.append({"section": title, "items": items})
         conn.close()
         return jsonify(result)
+    except Exception as e:
+        return handle_error(e)
+
+# -------------------- CALENDAR EVENTS --------------------
+
+@app.route('/calendar-events', methods=['POST'])
+def create_calendar_event():
+    try:
+        data = request.get_json()
+
+        # Validate required fields
+        required_fields = ['course_id', 'event_title', 'event_date']
+        if not all(field in data for field in required_fields):
+            return jsonify({'error': 'Missing required fields'}), 400
+        
+        cur, conn = get_cursor()
+        cur.execute("""
+            INSERT INTO CalendarEvents (course_id, event_title, event_date)
+            VALUES (%s, %s, %s) RETURNING event_id
+        """, (data['course_id'], data['event_title'], data['event_date']))
+        
+        event_id = cur.fetchone()[0]
+        conn.commit()
+        conn.close()
+        
+        return jsonify({'message': 'Calendar event created successfully', 'event_id': event_id}), 201
+    except Exception as e:
+        return handle_error(e)
+
+@app.route('/calendar/course/<int:course_id>', methods=['GET'])
+def get_course_events(course_id):
+    try:
+        cur, conn = get_cursor()
+        cur.execute("SELECT * FROM CalendarEvents WHERE course_id = %s", (course_id,))
+        columns = [desc[0] for desc in cur.description]
+        events = [dict(zip(columns, row)) for row in cur.fetchall()]
+        conn.close()
+        return jsonify(events)
+    except Exception as e:
+        return handle_error(e)
+
+@app.route('/calendar/student/<int:user_id>/date/<date>', methods=['GET'])
+def get_student_events(user_id, date):
+    try:
+        cur, conn = get_cursor()
+        cur.execute("""
+            SELECT ce.* FROM CalendarEvents ce
+            JOIN Enrollments e ON ce.course_id = e.course_id
+            WHERE e.user_id = %s AND ce.event_date = %s
+        """, (user_id, date))
+        columns = [desc[0] for desc in cur.description]
+        events = [dict(zip(columns, row)) for row in cur.fetchall()]
+        conn.close()
+        return jsonify(events)
     except Exception as e:
         return handle_error(e)
 
