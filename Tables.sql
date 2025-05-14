@@ -20,7 +20,7 @@ CREATE TABLE Courses (
     course_id SERIAL PRIMARY KEY,
     course_name VARCHAR(150) NOT NULL,
     description TEXT,
-    lecturer_id INT REFERENCES Users(user_id) 
+    lecturer_id INT REFERENCES Users(user_id) -- must be a lecturer
 );
 
 
@@ -50,6 +50,9 @@ CREATE TABLE Forums (
 );
 
 
+DROP TABLE IF EXISTS DiscussionThreads CASCADE;
+
+
 CREATE TABLE DiscussionThreads (
     thread_id SERIAL PRIMARY KEY,
     forum_id INT REFERENCES Forums(forum_id),
@@ -58,6 +61,8 @@ CREATE TABLE DiscussionThreads (
     content TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+
 
 
 
@@ -77,6 +82,21 @@ CREATE TABLE Assignments (
     title VARCHAR(255),
     due_date DATE
 );
+
+
+
+
+SELECT
+    s.user_id,
+    AVG(s.grade) AS final_average
+FROM
+    Submissions s
+JOIN
+    Assignments a ON s.assignment_id = a.assignment_id
+GROUP BY
+    s.user_id
+ORDER BY
+    final_average DESC;
 
 
 CREATE TABLE Submissions (
@@ -106,3 +126,59 @@ CREATE TABLE SectionItems (
     name VARCHAR(255),
     link TEXT
 );
+
+
+CREATE VIEW students_5_plus AS
+SELECT
+    u.user_id AS student_id,
+    u.name AS student_name,
+    COUNT(e.course_id) AS course_count
+FROM
+    Users u
+JOIN
+    Enrollments e ON u.user_id = e.user_id
+WHERE
+    u.account_type = 'Student'
+GROUP BY
+    u.user_id, u.name
+HAVING
+    COUNT(e.course_id) >= 5;
+
+
+
+
+
+
+
+    CREATE VIEW courses_50_plus AS
+SELECT
+    c.course_id,
+    c.course_name, -- or whatever your column is
+    COUNT(e.user_id) AS student_count
+FROM
+    Courses c
+JOIN
+    Enrollments e ON c.course_id = e.course_id
+GROUP BY
+    c.course_id, c.course_name
+HAVING
+    COUNT(e.user_id) > 50;
+
+
+
+CREATE VIEW lecturers_3_plus AS
+SELECT
+    u.user_id AS lecturer_id,
+    u.name AS lecturer_name,
+    COUNT(c.course_id) AS course_count
+FROM
+    Users u
+JOIN
+    Courses c ON u.user_id = c.lecturer_id
+WHERE
+    u.account_type = 'Lecturer'
+GROUP BY
+    u.user_id, u.name
+HAVING
+    COUNT(c.course_id) >= 3;
+
