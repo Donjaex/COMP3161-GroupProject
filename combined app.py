@@ -165,23 +165,23 @@ def create_course():
             'lecturer_id': 'lecturer_id'
         }
         
-        # Check if all required fields are available in the database
+        
         if None in field_mappings.values():
             missing_fields = [k for k, v in field_mappings.items() if v is None]
             return jsonify({'error': f'Database schema missing required fields: {missing_fields}'}), 500
             
-        # Validate the request has all required fields
+        
         required_fields = ['course_id', 'title', 'description', 'lecturer_id']
         if not all(field in data for field in required_fields):
             return jsonify({'error': 'Missing course information'}), 400
             
-        # Create the SQL query with the correct column names
+        
         query = f"""
             INSERT INTO Courses (course_id, {field_mappings['title']}, description, lecturer_id)
             VALUES (%s, %s, %s, %s)
         """
         
-        # Execute the query
+        
         cur.execute(query, (data['course_id'], data['title'], data['description'], data['lecturer_id']))
         conn.commit()
         conn.close()
@@ -216,7 +216,7 @@ def get_lecturer_courses(lecturer_id):
         """)
         columns = [col[0] for col in cur.fetchall()]
         
-        # Look for possible title columns
+        
         title_column = None
         possible_names = ['name', 'course_name', 'course_title', 'title', 'description']
         for col in possible_names:
@@ -227,7 +227,7 @@ def get_lecturer_courses(lecturer_id):
         if not title_column:
             return jsonify({"error": "Could not find title column in courses table"}), 500
         
-        # Use the identified column name in the query
+        
         query = f"""
             SELECT course_id, {title_column}
             FROM courses
@@ -330,7 +330,7 @@ def make_report(view_name, columns):
 
 @app.route('/reports/courses_50_plus', methods=['GET'])
 def report_courses_50_plus():
-    # Get column names to identify the title column
+    
     try:
         cur, conn = get_cursor()
         cur.execute("""
@@ -341,7 +341,7 @@ def report_courses_50_plus():
         """)
         columns = [col[0] for col in cur.fetchall()]
         
-        # Look for possible title columns
+        
         title_column = 'title'  # Default
         possible_names = ['name', 'course_name', 'course_title', 'title', 'description']
         for col in possible_names:
@@ -395,10 +395,10 @@ def report_top_10_students():
 @app.route('/courses/most-enrolled', methods=['GET'])
 def most_enrolled_courses():
     try:
-        # Get cursor to interact with the database
+       
         cur, conn = get_cursor()
         
-        # Get column names to identify the title column
+        
         cur.execute("""
             SELECT column_name 
             FROM information_schema.columns 
@@ -481,7 +481,7 @@ def get_top_10_students_by_average():
         
         conn.close()
 
-        # If no students with grades were found
+        
         if not students:
             return jsonify({"message": "No students with grades found."}), 200
 
@@ -586,22 +586,22 @@ def create_thread():
         title = data['title']
         content = data['content']
 
-        # Connect to the database
+        
         cur, conn = get_cursor()
 
-        # Check if forum_id exists
+        
         cur.execute("SELECT forum_id FROM forums WHERE forum_id = %s", (forum_id,))
         if not cur.fetchone():
             conn.close()
             return jsonify({"error": "forum_id does not exist in the forums table."}), 400
 
-        # Check if user_id exists
+        
         cur.execute("SELECT user_id FROM users WHERE user_id = %s", (user_id,))
         if not cur.fetchone():
             conn.close()
             return jsonify({"error": "user_id does not exist in the users table."}), 400
 
-        # Insert the thread and get the thread_id
+        
         cur.execute("""
             INSERT INTO DiscussionThreads (forum_id, user_id, title, content)
             VALUES (%s, %s, %s, %s) RETURNING thread_id, forum_id, user_id, title, content, created_at
@@ -611,18 +611,18 @@ def create_thread():
         thread = cur.fetchone()
         thread_id, forum_id, user_id, title, content, created_at = thread
 
-        # Commit the transaction and close the connection
+        
         conn.commit()
         conn.close()
 
-        # Return the created thread details
+        
         return jsonify({
             "thread_id": thread_id,
             "forum_id": forum_id,
             "user_id": user_id,
             "title": title,
             "content": content,
-            "created_at": created_at.isoformat()  # Format created_at to ISO 8601
+            "created_at": created_at.isoformat()  
         }), 201
 
     except Exception as e:
@@ -652,7 +652,7 @@ def get_course_members(course_id):
         """, (course_id,))
         lecturer = cur.fetchone()
         
-        # Get all students enrolled in this course
+        
         cur.execute("""
             SELECT u.user_id, u.name, u.email, 'Student' as role
             FROM Users u
@@ -751,17 +751,17 @@ def create_reply():
             conn.close()
             return jsonify({"error": "user_id does not exist in the users table."}), 400
 
-        # Insert the reply, letting the database handle the reply_id generation
+        
         cur.execute("""
             INSERT INTO Replies (thread_id, user_id, content, parent_reply_id, timestamp)
             VALUES (%s, %s, %s, %s, %s) RETURNING reply_id, thread_id, user_id, content, parent_reply_id, timestamp
         """, (thread_id, user_id, content, parent_reply_id, created_at))
 
-        # Fetch the reply details
+     # Fetch the reply details
         reply = cur.fetchone()
         reply_id, thread_id, user_id, content, parent_reply_id, timestamp = reply
 
-        # Commit the transaction and close the connection
+        
         conn.commit()
         conn.close()
 
@@ -950,7 +950,7 @@ def test_student_events(user_id, date):
                 "courses": []
             })
         
-        # Get all events for these courses, regardless of date (for debugging)
+        
         placeholders = ','.join(['%s'] * len(courses))
         cur.execute(f"""
             SELECT * FROM CalendarEvents 
@@ -961,12 +961,12 @@ def test_student_events(user_id, date):
         columns = [desc[0] for desc in cur.description]
         for row in cur.fetchall():
             event = dict(zip(columns, row))
-            # Convert event_date to string for display
+            
             if 'event_date' in event and event['event_date']:
                 event['event_date'] = str(event['event_date'])
             all_events.append(event)
         
-        # Now filter for the specific date (done here to see all events first)
+        
         filtered_events = []
         for event in all_events:
             # Print event date for debugging
