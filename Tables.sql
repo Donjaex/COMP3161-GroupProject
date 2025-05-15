@@ -182,3 +182,102 @@ GROUP BY
 HAVING
     COUNT(c.course_id) >= 3;
 
+CREATE OR REPLACE VIEW top_10_enrolled AS
+SELECT 
+    c.course_id, 
+    c.title AS course_name, 
+    COUNT(e.user_id) AS student_count
+FROM 
+    Courses c 
+JOIN 
+    Enrollments e ON c.course_id = e.course_id 
+GROUP BY 
+    c.course_id, c.title 
+ORDER BY 
+    student_count DESC 
+LIMIT 10;
+
+
+
+-- First, drop the view if it exists
+DROP VIEW IF EXISTS top_10_enrolled;
+
+-- Then create it
+CREATE VIEW top_10_enrolled AS
+SELECT 
+    c.course_id,
+    c.course_name, -- Replace with your actual column name if different
+    COUNT(e.user_id) AS student_count
+FROM 
+    Courses c 
+JOIN 
+    Enrollments e ON c.course_id = e.course_id 
+GROUP BY 
+    c.course_id, c.course_name
+ORDER BY 
+    student_count DESC 
+LIMIT 10;
+
+
+--check if its 100000 students
+SELECT COUNT(*) AS student_count 
+FROM Users 
+WHERE account_type = 'Student';
+
+
+-- b. Check if you have at least 200 courses
+SELECT COUNT(*) AS course_count 
+FROM Courses;
+
+
+-- c. Check that no student is doing more than 6 courses
+SELECT u.user_id, u.name, COUNT(e.course_id) AS course_count
+FROM Users u
+JOIN Enrollments e ON u.user_id = e.user_id
+WHERE u.account_type = 'Student'
+GROUP BY u.user_id, u.name
+HAVING COUNT(e.course_id) > 6
+ORDER BY course_count DESC;
+
+
+-- d. Check that all students are enrolled in at least 3 courses
+SELECT u.user_id, u.name, COUNT(e.course_id) AS course_count
+FROM Users u
+LEFT JOIN Enrollments e ON u.user_id = e.user_id
+WHERE u.account_type = 'Student'
+GROUP BY u.user_id, u.name
+HAVING COUNT(e.course_id) < 3
+ORDER BY course_count ASC;
+-- Should return 0 rows if requirement is met
+
+-- e. Check that each course has at least 10 members
+SELECT c.course_id, 
+       c.course_name AS course_name, 
+       COUNT(e.user_id) AS student_count
+FROM Courses c
+LEFT JOIN Enrollments e ON c.course_id = e.course_id
+GROUP BY c.course_id, c.course_name
+HAVING COUNT(e.user_id) < 10
+ORDER BY student_count ASC;
+
+
+-- f. Check that no lecturer teaches more than 5 courses
+SELECT u.user_id, u.name, COUNT(c.course_id) AS course_count
+FROM Users u
+JOIN Courses c ON u.user_id = c.lecturer_id
+WHERE u.account_type = 'Lecturer'
+GROUP BY u.user_id, u.name
+HAVING COUNT(c.course_id) > 5
+ORDER BY course_count DESC;
+
+-- g. Check that each lecturer teaches at least 1 course
+SELECT u.user_id, u.name, COUNT(c.course_id) AS course_count
+FROM Users u
+LEFT JOIN Courses c ON u.user_id = c.lecturer_id
+WHERE u.account_type = 'Lecturer'
+GROUP BY u.user_id, u.name
+HAVING COUNT(c.course_id) < 1
+ORDER BY course_count ASC;
+
+
+
