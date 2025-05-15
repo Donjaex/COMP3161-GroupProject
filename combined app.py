@@ -4,6 +4,12 @@ from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
+
+from flask_cors import CORS
+
+app = Flask(__name__)
+CORS(app)  # Enable CORS for all routes
+
 # === Database Configuration ===
 DATABASE_URL = os.environ.get("DATABASE_URL", "dbname=course_db user=postgres password=yourpassword host=localhost port=5432")
 
@@ -448,19 +454,40 @@ def get_top_10_students_by_average():
         if cur is None or conn is None:
             return jsonify({"error": "Database connection failed."}), 500
 
-        # Query to get the top 10 students with the highest overall averages
+        # Modified query to only include students with non-null grades
+        # and to format the average properly
         cur.execute("""
-            SELECT u.user_id, u.name, AVG(s.grade) AS average_grade
+            SELECT u.user_id, u.name, ROUND(AVG(s.grade)::numeric, 2) AS average_grade
             FROM Users u
             JOIN Submissions s ON u.user_id = s.user_id
-            GROUP BY u.user_id
+            WHERE u.account_type = 'Student' AND s.grade IS NOT NULL
+            GROUP BY u.user_id, u.name
+            HAVING AVG(s.grade) IS NOT NULL
             ORDER BY average_grade DESC
             LIMIT 10;
         """)
 
-        students = cur.fetchall()
+        # Fetch the results
+        rows = cur.fetchall()
+        
+        # Format the results
+        students = []
+        for row in rows:
+            students.append({
+                "student_id": row[0],
+                "name": row[1],
+                "average_grade": float(row[2]) if row[2] is not None else None
+            })
+        
         conn.close()
 
+        # If no students with grades were found
+        if not students:
+            return jsonify({"message": "No students with grades found."}), 200
+
+        return jsonify(students), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
         return jsonify(students), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -477,30 +504,78 @@ def create_forum():
         title = data['forum_title']
 
         cur, conn = get_cursor()
-        # Check if course_id exists in the courses table
-        cur.execute("SELECT course_id FROM courses WHERE course_id = %s", (course_id,))
+        
+        # First check if the course exists (using a more flexible approach)
+        cur.execute("""
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.tables 
+                WHERE table_schema = 'public' AND table_name = 'courses'
+            )
+        """)
+        
+        if cur.fetchone()[0]:
+            table_name = 'courses'
+        else:
+            table_name = 'Courses'
+            
+        # Check if course exists
+        cur.execute(f'SELECT course_id FROM "{table_name}" WHERE course_id = %s', (course_id,))
         if not cur.fetchone():
             conn.close()
-            return jsonify({"error": "course_id does not exist in the courses table."}), 400
+            return jsonify({"error": f"Course with ID {course_id} not found."}), 404
 
-        cur.execute("INSERT INTO Forums (course_id, forum_title) VALUES (%s, %s) RETURNING forum_id", (course_id, title))
+        # Get the next available forum_id
+        cur.execute("SELECT MAX(forum_id) + 1 FROM Forums")
+        next_id = cur.fetchone()[0] or 1
+        
+        # Insert with explicit ID to avoid sequence issues
+        cur.execute("""
+            INSERT INTO Forums (forum_id, course_id, forum_title)
+            VALUES (%s, %s, %s)
+            RETURNING forum_id
+        """, (next_id, course_id, title))
+        
         forum_id = cur.fetchone()[0]
         conn.commit()
         conn.close()
-        return jsonify({"forum_id": forum_id}), 201
+        
+        return jsonify({
+            "message": "Forum created successfully",
+            "forum_id": forum_id
+        }), 201
+        
     except Exception as e:
         return handle_error(e)
-
-@app.route('/forums/<int:course_id>', methods=['GET'])
-def get_forums(course_id):
+    
+@app.route('/forum/<int:forum_id>', methods=['GET'])
+def get_forum_by_id(forum_id):
     try:
         cur, conn = get_cursor()
-        cur.execute("SELECT forum_id, forum_title FROM Forums WHERE course_id = %s", (course_id,))
-        forums = cur.fetchall()
+        
+        # Get the basic forum information
+        cur.execute("""
+            SELECT * FROM Forums WHERE forum_id = %s
+        """, (forum_id,))
+        
+        if cur.rowcount == 0:
+            conn.close()
+            return jsonify({"error": f"Forum with ID {forum_id} not found"}), 404
+            
+        columns = [desc[0] for desc in cur.description]
+        forum_row = cur.fetchone()
+        
+        # Convert to dictionary
+        forum = dict(zip(columns, forum_row))
+        
         conn.close()
-        return jsonify([{"id": f[0], "title": f[1]} for f in forums])
+        return jsonify(forum)
+        
     except Exception as e:
-        return handle_error(e)
+        app.logger.error(f"Error getting forum: {str(e)}")
+        return handle_error(e)    
+    
+
+    
 
 @app.route('/threads', methods=['POST'])
 def create_thread():
@@ -552,6 +627,67 @@ def create_thread():
 
     except Exception as e:
         return handle_error(e)
+    
+
+
+    
+    
+@app.route('/courses/<int:course_id>/members', methods=['GET'])
+def get_course_members(course_id):
+    try:
+        cur, conn = get_cursor()
+        
+        # First, check if the course exists
+        cur.execute("SELECT course_id FROM Courses WHERE course_id = %s", (course_id,))
+        if not cur.fetchone():
+            conn.close()
+            return jsonify({"error": f"Course with ID {course_id} not found"}), 404
+        
+        # Get the lecturer for this course
+        cur.execute("""
+            SELECT u.user_id, u.name, u.email, 'Lecturer' as role
+            FROM Courses c
+            JOIN Users u ON c.lecturer_id = u.user_id
+            WHERE c.course_id = %s
+        """, (course_id,))
+        lecturer = cur.fetchone()
+        
+        # Get all students enrolled in this course
+        cur.execute("""
+            SELECT u.user_id, u.name, u.email, 'Student' as role
+            FROM Users u
+            JOIN Enrollments e ON u.user_id = e.user_id
+            WHERE e.course_id = %s
+            AND u.account_type = 'Student'
+        """, (course_id,))
+        students = cur.fetchall()
+        
+        # Combine the results
+        members = []
+        if lecturer:
+            members.append({
+                "user_id": lecturer[0],
+                "name": lecturer[1],
+                "email": lecturer[2],
+                "role": lecturer[3]
+            })
+        
+        for student in students:
+            members.append({
+                "user_id": student[0],
+                "name": student[1],
+                "email": student[2],
+                "role": student[3]
+            })
+        
+        conn.close()
+        return jsonify({
+            "course_id": course_id,
+            "member_count": len(members),
+            "members": members
+        })
+    except Exception as e:
+        return handle_error(e)    
 
 @app.route('/threads/<int:forum_id>', methods=['GET'])
 def get_threads(forum_id):
@@ -775,6 +911,83 @@ def create_calendar_event():
         return jsonify({'message': 'Calendar event created successfully', 'event_id': event_id}), 201
     except Exception as e:
         return handle_error(e)
+    
+@app.route('/debug/student-enrollment/<int:student_id>/<int:course_id>', methods=['GET'])
+def check_student_enrollment(student_id, course_id):
+    try:
+        cur, conn = get_cursor()
+        cur.execute("""
+            SELECT * FROM Enrollments 
+            WHERE user_id = %s AND course_id = %s
+        """, (student_id, course_id))
+        
+        enrollment = cur.fetchone()
+        is_enrolled = enrollment is not None
+        
+        conn.close()
+        return jsonify({
+            "student_id": student_id,
+            "course_id": course_id,
+            "is_enrolled": is_enrolled
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    
+@app.route('/test/student-events/<int:user_id>/<date>', methods=['GET'])
+def test_student_events(user_id, date):
+    try:
+        cur, conn = get_cursor()
+        
+        # First, get courses the student is enrolled in
+        cur.execute("SELECT course_id FROM Enrollments WHERE user_id = %s", (user_id,))
+        courses = [row[0] for row in cur.fetchall()]
+        
+        # If no courses, return empty
+        if not courses:
+            return jsonify({
+                "message": "Student not enrolled in any courses",
+                "student_id": user_id,
+                "courses": []
+            })
+        
+        # Get all events for these courses, regardless of date (for debugging)
+        placeholders = ','.join(['%s'] * len(courses))
+        cur.execute(f"""
+            SELECT * FROM CalendarEvents 
+            WHERE course_id IN ({placeholders})
+        """, courses)
+        
+        all_events = []
+        columns = [desc[0] for desc in cur.description]
+        for row in cur.fetchall():
+            event = dict(zip(columns, row))
+            # Convert event_date to string for display
+            if 'event_date' in event and event['event_date']:
+                event['event_date'] = str(event['event_date'])
+            all_events.append(event)
+        
+        # Now filter for the specific date (done here to see all events first)
+        filtered_events = []
+        for event in all_events:
+            # Print event date for debugging
+            print(f"Event date: {event.get('event_date')}, Target date: {date}")
+            # Simple string comparison for debugging
+            if date in str(event.get('event_date', '')):
+                filtered_events.append(event)
+        
+        conn.close()
+        return jsonify({
+            "student_id": user_id,
+            "date": date,
+            "courses": courses,
+            "all_events": all_events,
+            "filtered_events": filtered_events
+        })
+        
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+    
 
 @app.route('/calendar/course/<int:course_id>', methods=['GET'])
 def get_course_events(course_id):
